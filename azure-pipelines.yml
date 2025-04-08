@@ -1,0 +1,72 @@
+trigger:
+  - master
+
+variables:
+  - group: aws-deploy-variables
+
+stages:
+  - stage: Build
+    jobs:
+      - job: ZipArtifact
+        pool:
+          vmImage: 'ubuntu-latest' 
+        steps:
+          - script: |
+              echo "Zipping application code"
+              zip -r app.zip . -x '*.git*'
+            displayName: 'Zip source code'
+
+          - task: UseDotNet@2
+            inputs:
+              packageType: 'sdk'
+              version: '6.0.x' # or whatever version you use
+
+          - task: DotNetCoreCLI@2
+            inputs:
+             command: 'restore'
+             projects: '**/*.csproj'
+
+          - task: DotNetCoreCLI@2
+            inputs:
+              command: 'build'
+              projects: '**/*.csproj'
+              arguments: '--configuration Release'
+
+          - task: DotNetCoreCLI@2
+            inputs:
+              command: 'publish'
+              publishWebProjects: true
+              arguments: '--configuration Release --output $(Build.ArtifactStagingDirectory)'
+              zipAfterPublish: true
+
+  - stage: Deploy
+    dependsOn: Build
+    jobs:
+      - job: CodeDeploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - download: current
+            artifact: app
+
+          - script: |
+              echo "Setting up AWS CLI"
+              aws configure set aws_access_key_id $(AWS_ACCESS_KEY_ID)
+              aws configure set aws_secret_access_key $(AWS_SECRET_ACCESS_KEY)
+              aws configure set region $(AWS_REGION)
+            displayName: 'Configure AWS CLI'
+
+          - script: |
+              echo "Uploading to S3"
+              aws s3 cp $(Pipeline.Workspace)/app/app.zip s3://$(S3_BUCKET)/app.zip
+            displayName: 'Upload to S3'
+
+          - script: |
+              echo "Triggering CodeDeploy Deployment"
+              aws deploy create-deployment \
+                --application-name $(CODEDEPLOY_APP) \
+                --deployment-group-name $(CODEDEPLOY_GROUP) \
+                --s3-location bucket=$(S3_BUCKET),bundleType=zip,key=app.zip \
+                --file-exists-behavior OVERWRITE \
+                --deployment-config-name CodeDeployDefault.AllAtOnce
+            displayName: 'Trigger Deployment'
